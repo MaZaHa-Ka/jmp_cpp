@@ -375,6 +375,7 @@ void Patch2() // !! NO MOVE OFFSETS INSTRUCTIONS (jmp, mov) они раюотают по оффс
 // OutPatchPtr выходной параметр patch sz (на скопированный опкод)
 // OutPatchSzBlock выделенный размер (больше чем запрашиваемый)
 //jmp_patch_in_end_region false jmp после нашего блока PatchSzBlock, true в конце региона
+// !!!!!!!!!!!!!!!!!!!!!!!!!OrigSzBlock минимум 5 байт, не использовать перенос комманд mov jz jmp так как они работачт через оффсет своего адреса
 bool SetPatchBlock(void* OrigPtr, int OrigSzBlock, int PatchSzBlock, void*& OutPatchPtr, int& OutPatchSzBlock, bool jmp_patch_in_end_region = false) // !! NO MOVE OFFSETS INSTRUCTIONS (jmp, mov) они раюотают по оффсету из своего адреса
 {
 	MEMORY_BASIC_INFORMATION mbi_orig = GetRegionInfoByPointer(OrigPtr);
@@ -432,14 +433,8 @@ bool SetPatchBlock(void* OrigPtr, int OrigSzBlock, int PatchSzBlock, void*& OutP
 	//---JMP AFTER ORIG OPCODE IN PATCHED BLOCK !! no patching space in patched region
 	//ptr_to_orig_jmp = Transpose(patchBlock, OrigSzBlock);
 
-	if (jmp_patch_in_end_region)
-	{
-		ptr_to_orig_jmp = Transpose(patchBlock, (mbi_patched.RegionSize - sizeof(char) - sizeof(void*)));
-	}
-	else
-	{
-		ptr_to_orig_jmp = Transpose(patchBlock, (OrigSzBlock + PatchSzBlock));
-	}
+	if (jmp_patch_in_end_region) { ptr_to_orig_jmp = Transpose(patchBlock, (mbi_patched.RegionSize - sizeof(char) - sizeof(void*))); }
+	else { ptr_to_orig_jmp = Transpose(patchBlock, (OrigSzBlock + PatchSzBlock)); }
 
 	PD_WriteDanger<char>(ptr_to_orig_jmp, jmp); // jmp to orig block
 	int offset1 = CalcJMPE9Offset(ptr_to_orig_jmp, Transpose(OrigPtr, OrigSzBlock));
