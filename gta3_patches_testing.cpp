@@ -375,15 +375,20 @@ void Patch2() // !! NO MOVE OFFSETS INSTRUCTIONS (jmp, mov) они раюотают по оффс
 // OutPatchPtr выходной параметр patch sz (на скопированный опкод)
 // OutPatchSzBlock выделенный размер (больше чем запрашиваемый)
 //jmp_patch_in_end_region false jmp после нашего блока PatchSzBlock, true в конце региона
+//offset оффсет переноса кода от начала блока
 // !!!!!!!!!!!!!!!!!!!!!!!!!OrigSzBlock минимум 5 байт, не использовать перенос комманд mov jz jmp так как они работачт через оффсет своего адреса
-bool SetPatchBlock(void* OrigPtr, int OrigSzBlock, int PatchSzBlock, void*& OutPatchPtr, int& OutPatchSzBlock, bool jmp_patch_in_end_region = false) // !! NO MOVE OFFSETS INSTRUCTIONS (jmp, mov) они раюотают по оффсету из своего адреса
+// !!!!!!!!!!!!!!!!!!!!!!!!!если юзаешь mov jz jmp нужно патчить их оффсет
+bool SetPatchBlock(void* OrigPtr, int OrigSzBlock, int PatchSzBlock, void*& OutPatchPtr, int& OutPatchSzBlock, bool jmp_patch_in_end_region = false, uintptr_t offset = 0) // !! NO MOVE OFFSETS INSTRUCTIONS (jmp, mov) они раюотают по оффсету из своего адреса
 {
 	MEMORY_BASIC_INFORMATION mbi_orig = GetRegionInfoByPointer(OrigPtr);
 	if (!mbi_orig.RegionSize) { return false; } // cant find base+sz
+	if (offset < 0) { return false; }
 	DWORD oldProtect_orig;
 	bool orig_protect_ch = false; // флаг для возврата оригинальных прав блока
 	char nop = 0x90;
 	char jmp = 0xE9; // прыжок со смещением 4байта (opcode addr + sz(0xE9) + sz(offset) + *offset(*(start+sz(opcode))))
+	uintptr_t jmp_sz = (sizeof(char) + sizeof(void*));
+	uintptr_t need_block_sz = (OrigSzBlock + PatchSzBlock + jmp_sz); // orig opcode + patch + jmp
 
 	bool return_orig_protect = true;
 
@@ -403,8 +408,7 @@ bool SetPatchBlock(void* OrigPtr, int OrigSzBlock, int PatchSzBlock, void*& OutP
 
 	//-------MK PATCH BLOCK
 	// patched_block_sz чисто для выделения памяти, VirtualAlloc даёт больше памяти
-	size_t patched_block_sz = (OrigSzBlock + PatchSzBlock + sizeof(char) + sizeof(void*)); // orig opcode + patch + jmp
-	void* patchBlock = VirtualAlloc(nullptr, patched_block_sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); //(LPVOID) nullptr => random memory
+	void* patchBlock = VirtualAlloc(nullptr, need_block_sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); //(LPVOID) nullptr => random memory
 	if (patchBlock == nullptr) { return false; } // cant create memblock 4 patch
 	MEMORY_BASIC_INFORMATION mbi_patched = GetRegionInfoByPointer(patchBlock);
 
@@ -423,7 +427,12 @@ bool SetPatchBlock(void* OrigPtr, int OrigSzBlock, int PatchSzBlock, void*& OutP
 	//memset(buffer, 0, sizeof(buffer));
 	memset(patchBlock, nop, mbi_patched.RegionSize);
 	//memset(patchBlock, nop, patched_block_sz);
-	std::memcpy(patchBlock, OrigPtr, OrigSzBlock); // to from sz  OrigSzBlock=6
+
+	uintptr_t full_block_sz = jmp_patch_in_end_region ? (mbi_patched.RegionSize - jmp_sz) : (need_block_sz - jmp_sz);
+	if (offset > (full_block_sz - OrigSzBlock)) { offset = 0; } // можно офсетить больше PatchSzBlock если jmp в конце
+	//if (offset > (full_block_sz - OrigSzBlock)) { VirtualFree(patchBlock, 0, MEM_RELEASE); return false; } // можно офсетить больше PatchSzBlock если jmp в конце
+	//if (offset > PatchSzBlock) { offset = 0; } // only patch block. additional not used
+	std::memcpy(Transpose(patchBlock, offset), OrigPtr, OrigSzBlock); // to from sz  OrigSzBlock=6
 
 	void* ptr_to_orig_jmp = nullptr;
 	//---JMP IN END BLOCK !! universal
@@ -433,7 +442,7 @@ bool SetPatchBlock(void* OrigPtr, int OrigSzBlock, int PatchSzBlock, void*& OutP
 	//---JMP AFTER ORIG OPCODE IN PATCHED BLOCK !! no patching space in patched region
 	//ptr_to_orig_jmp = Transpose(patchBlock, OrigSzBlock);
 
-	if (jmp_patch_in_end_region) { ptr_to_orig_jmp = Transpose(patchBlock, (mbi_patched.RegionSize - sizeof(char) - sizeof(void*))); }
+	if (jmp_patch_in_end_region) { ptr_to_orig_jmp = Transpose(patchBlock, (mbi_patched.RegionSize - jmp_sz)); }
 	else { ptr_to_orig_jmp = Transpose(patchBlock, (OrigSzBlock + PatchSzBlock)); }
 
 	PD_WriteDanger<char>(ptr_to_orig_jmp, jmp); // jmp to orig block
@@ -475,27 +484,29 @@ bool SetPatchBlock(void* OrigPtr, int OrigSzBlock, int PatchSzBlock, void*& OutP
 	//std::cout << "PATCH: 0x" << patchBlock << "\n";
 	//std::cout << "PATCH SZ BLOCK: " << mbi_patched.RegionSize << "\n";
 	//VirtualFree(patchBlock, 0, MEM_RELEASE);
+	return true;
 }
 
 
 
 void PatchTest()
 {
-	void* orig_ptr_for_patch_reference = (void*)0x505505; // !jmp !jz !mov NO OFFSETS OPCODES (def patch sz 5bytes)
-	int available_sz_patch = 6; // (AA BB 11223344)
-	int need_sz_patch = 20; // bytes
+	void* orig_ptr_for_patch_reference = (void*)0x4EACC0; // !jmp !jz !mov NO OFFSETS OPCODES (def patch sz 5bytes)
+	int available_sz_patch = 51;
+	int need_sz_patch = 200; // bytes
+	int offset = need_sz_patch; // max need_sz_patch(будет в конце перед jmp)  block(200+51+1+4)
+	bool jmp_patch_in_end_region = false;
 
 	//---OUT
 	void* out_patch_ptr = nullptr;
 	int out_patch_sz = 0; // mbi.region_sz
-	//bool res = SetPatchBlock(orig_ptr_for_patch_reference, available_sz_patch, need_sz_patch, out_patch_ptr, out_patch_sz, true); // jmp in the end region
-	bool res = SetPatchBlock(orig_ptr_for_patch_reference, available_sz_patch, need_sz_patch, out_patch_ptr, out_patch_sz, false); // jmp after need_sz_patch
+	//bool res = SetPatchBlock(orig_ptr_for_patch_reference, available_sz_patch, need_sz_patch, out_patch_ptr, out_patch_sz, true, offset); // jmp in the end region
+	bool res = SetPatchBlock(orig_ptr_for_patch_reference, available_sz_patch, need_sz_patch, out_patch_ptr, out_patch_sz, jmp_patch_in_end_region, offset); // jmp after need_sz_patch
 
 	//std::cout << "ORIG: 0x" << orig_ptr_for_patch_reference << "\n";
 	//std::cout << "PATCH: 0x" << out_patch_ptr << "\n";
 	//std::cout << "PATCH SZ BLOCK: " << out_patch_sz << "\n";
 }
-
 
 
 bool initRwEventFIX = false;
