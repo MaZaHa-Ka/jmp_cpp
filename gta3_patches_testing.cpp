@@ -268,11 +268,11 @@ MEMORY_BASIC_INFORMATION GetRegionInfoByPointer(void* ptr) // if (mbi.BaseAddres
 }
 
 
-uintptr_t CalcJMPE9Offset(void* op_addr, void* dest_ptr) // считает офсет для прыжка jmp. можно -значения, прыгает по офсету после ласт байта инструкции, E9 00 00 00 00 + offset
+int CalcJMPE9Offset(void* op_addr, void* dest_ptr) // считает офсет для прыжка jmp. можно -значения, прыгает по офсету после ласт байта инструкции, E9 00 00 00 00 + offset
 {
 	uintptr_t op_address = (uintptr_t)op_addr;
 	uintptr_t dest_address = (uintptr_t)dest_ptr;
-	uintptr_t offset = (uintptr_t)(dest_address - (op_address + 1 + sizeof(uintptr_t))); // -16 fffffff0 jump upper
+	int offset = (int)(dest_address - (op_address + 1 + sizeof(uintptr_t))); // -16 fffffff0 jump upper
 	return offset;
 }
 
@@ -281,16 +281,22 @@ void Patch2()
 	void* originalCodeBlock = (void*)0x505505;
 	size_t block_sz = 34; // bytes je - je
 
+	MEMORY_BASIC_INFORMATION mbi_orig = GetRegionInfoByPointer(originalCodeBlock);
+	if (!mbi_orig.RegionSize) { return; } // cant find base+sz
+	DWORD oldProtect_orig;
+	bool orig_protect_ch = false;
+
 	//if (!_CheckPointerReadByType<char>(originalCodeBlock)) { return; } // no readable
 	if (!_CheckPointerBoundsRead(originalCodeBlock)) { return; } // no readable mini optimize
+
 
 	//if (!_CheckPointerWriteByType<char>(originalCodeBlock)) // cant patch
 	if (!_CheckPointerBoundsWrite(originalCodeBlock)) // cant patch mini optimize
 	{
-		MEMORY_BASIC_INFORMATION mbi = GetRegionInfoByPointer(originalCodeBlock);
-		if (!mbi.RegionSize) { return; } // cant find base+sz
-		DWORD oldProtect;
-		VirtualProtect((LPVOID)mbi.BaseAddress, mbi.RegionSize, PAGE_EXECUTE_READWRITE, &oldProtect);
+		//MEMORY_BASIC_INFORMATION mbi = GetRegionInfoByPointer(originalCodeBlock);
+		//if (!mbi.RegionSize) { return; } // cant find base+sz
+		orig_protect_ch = true;
+		VirtualProtect((LPVOID)mbi_orig.BaseAddress, mbi_orig.RegionSize, PAGE_EXECUTE_READWRITE, &oldProtect_orig);
 	}
 
 	void* TmpPtr = nullptr;
@@ -305,15 +311,15 @@ void Patch2()
 	void* patchBlock = VirtualAlloc(nullptr, patched_block_sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); //(LPVOID) nullptr => random memory
 	if (patchBlock == nullptr) { return; } // cant create memblock 4 patch
 
-	DWORD oldProtect;
-	VirtualProtect(patchBlock, patched_block_sz, PAGE_EXECUTE_READWRITE, &oldProtect); // PAGE_EXECUTE_READ
+	DWORD oldProtect_patched;
+	VirtualProtect(patchBlock, patched_block_sz, PAGE_EXECUTE_READWRITE, &oldProtect_patched); // PAGE_EXECUTE_READ
 
 
 
 	//-------------------------PREPEARE--PATCHED--BLOCK
 	//memset(buffer, 0, sizeof(buffer));
-	MEMORY_BASIC_INFORMATION mbi = GetRegionInfoByPointer(patchBlock);
-	memset(patchBlock, nop, mbi.RegionSize);
+	MEMORY_BASIC_INFORMATION mbi_patched = GetRegionInfoByPointer(patchBlock);
+	memset(patchBlock, nop, mbi_patched.RegionSize);
 	memset(patchBlock, nop, patched_block_sz);
 	std::memcpy(patchBlock, originalCodeBlock, block_sz); // to from sz
 	PD_WriteDanger<char>(Transpose(patchBlock, block_sz), jmp); // jmp
@@ -337,6 +343,20 @@ void Patch2()
 	uintptr_t offset2 = CalcJMPE9Offset(Transpose(originalCodeBlock, 0), patchBlock);
 	PD_WriteDanger<uintptr_t>(Transpose(originalCodeBlock, 1), offset2); // pointer to jump (ret to orig block)
 	//PD_WriteDanger<uintptr_t>(Transpose(originalCodeBlock, 1), PD_VoidPtr2IntPtr(patchBlock)); // pointer to jump (jmp 2 patch)
+
+
+	//------------------------ORIG---PROTECT
+	if (orig_protect_ch)
+	{
+		DWORD oldProtect_ch;
+		VirtualProtect((LPVOID)mbi_orig.BaseAddress, mbi_orig.RegionSize, oldProtect_orig, &oldProtect_ch);
+	}
+	//------------------------PATCHED--PROTECT
+	{
+		DWORD oldProtect_ptch;
+		VirtualProtect(patchBlock, patched_block_sz, PAGE_EXECUTE_READ, &oldProtect_ptch); // PAGE_EXECUTE_READWRITE
+	}
+
 
 
 	//std::cout << "ORIG: 0x" << originalCodeBlock << "  SZ: " << block_sz << "\n";
