@@ -276,7 +276,7 @@ int CalcJMPE9Offset(void* op_addr, void* dest_ptr) // считает офсет для прыжка j
 	return offset;
 }
 
-void Patch2()
+void Patch2() // !! NO MOVE OFFSETS INSTRUCTIONS (jmp, mov) они раюотают по оффсету из своего адреса
 {
 	void* originalCodeBlock = (void*)0x505505;
 	size_t block_sz = 34; // bytes je - je
@@ -323,8 +323,8 @@ void Patch2()
 	memset(patchBlock, nop, patched_block_sz);
 	std::memcpy(patchBlock, originalCodeBlock, block_sz); // to from sz
 	PD_WriteDanger<char>(Transpose(patchBlock, block_sz), jmp); // jmp
-	uintptr_t offset1 = CalcJMPE9Offset(Transpose(patchBlock, block_sz), Transpose(originalCodeBlock, block_sz));
-	PD_WriteDanger<uintptr_t>(Transpose(patchBlock, block_sz + 1), offset1); // pointer to jump (ret to orig block)
+	int offset1 = CalcJMPE9Offset(Transpose(patchBlock, block_sz), Transpose(originalCodeBlock, block_sz));
+	PD_WriteDanger<int>(Transpose(patchBlock, block_sz + 1), offset1); // pointer to jump (ret to orig block)
 	//PD_WriteDanger<uintptr_t>(Transpose(patchBlock, block_sz + 1), PD_VoidPtr2IntPtr(Transpose(originalCodeBlock, block_sz))); // bug !!only offset
 
 
@@ -340,8 +340,8 @@ void Patch2()
 	//}
 	memset(originalCodeBlock, nop, block_sz); // nop
 	PD_WriteDanger<char>(Transpose(originalCodeBlock, 0), jmp); // jmp
-	uintptr_t offset2 = CalcJMPE9Offset(Transpose(originalCodeBlock, 0), patchBlock);
-	PD_WriteDanger<uintptr_t>(Transpose(originalCodeBlock, 1), offset2); // pointer to jump (ret to orig block)
+	int offset2 = CalcJMPE9Offset(Transpose(originalCodeBlock, 0), patchBlock);
+	PD_WriteDanger<int>(Transpose(originalCodeBlock, 1), offset2); // pointer to jump (ret to orig block)
 	//PD_WriteDanger<uintptr_t>(Transpose(originalCodeBlock, 1), PD_VoidPtr2IntPtr(patchBlock)); // pointer to jump (jmp 2 patch)
 
 
@@ -368,6 +368,138 @@ void Patch2()
 
 
 
+// sz patch redirect x86 5bytes 1 + 4
+// OrigPtr указатель на инструкцию для хука
+// OrigSzBlock размер байтов для патча
+// PatchSzBlock кол-во байт для патча помиио нужных патчу mysz+ret+sz(void*)
+// OutPatchPtr выходной параметр patch sz (на скопированный опкод)
+// OutPatchSzBlock выделенный размер (больше чем запрашиваемый)
+//jmp_patch_in_end_region false jmp после нашего блока PatchSzBlock, true в конце региона
+bool SetPatchBlock(void* OrigPtr, int OrigSzBlock, int PatchSzBlock, void*& OutPatchPtr, int& OutPatchSzBlock, bool jmp_patch_in_end_region = false) // !! NO MOVE OFFSETS INSTRUCTIONS (jmp, mov) они раюотают по оффсету из своего адреса
+{
+	MEMORY_BASIC_INFORMATION mbi_orig = GetRegionInfoByPointer(OrigPtr);
+	if (!mbi_orig.RegionSize) { return false; } // cant find base+sz
+	DWORD oldProtect_orig;
+	bool orig_protect_ch = false; // флаг для возврата оригинальных прав блока
+	char nop = 0x90;
+	char jmp = 0xE9; // прыжок со смещением 4байта (opcode addr + sz(0xE9) + sz(offset) + *offset(*(start+sz(opcode))))
+
+	bool return_orig_protect = true;
+
+	//if (!_CheckPointerReadByType<char>(OrigPtr)) { return; } // no readable
+	if (!_CheckPointerBoundsRead(OrigPtr)) { return false; } // no readable mini optimize
+
+
+	//if (!_CheckPointerWriteByType<char>(OrigPtr)) // cant patch
+	if (!_CheckPointerBoundsWrite(OrigPtr)) // cant patch mini optimize
+	{
+		//MEMORY_BASIC_INFORMATION mbi = GetRegionInfoByPointer(originalCodeBlock);
+		//if (!mbi.RegionSize) { return; } // cant find base+sz
+		orig_protect_ch = true;
+		VirtualProtect((LPVOID)mbi_orig.BaseAddress, mbi_orig.RegionSize, PAGE_EXECUTE_READWRITE, &oldProtect_orig);
+	}
+
+
+	//-------MK PATCH BLOCK
+	// patched_block_sz чисто для выделения памяти, VirtualAlloc даёт больше памяти
+	size_t patched_block_sz = (OrigSzBlock + PatchSzBlock + sizeof(char) + sizeof(void*)); // orig opcode + patch + jmp
+	void* patchBlock = VirtualAlloc(nullptr, patched_block_sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); //(LPVOID) nullptr => random memory
+	if (patchBlock == nullptr) { return false; } // cant create memblock 4 patch
+	MEMORY_BASIC_INFORMATION mbi_patched = GetRegionInfoByPointer(patchBlock);
+
+	DWORD oldProtect_patched;
+	//VirtualProtect(patchBlock, patched_block_sz, PAGE_EXECUTE_READWRITE, &oldProtect_patched); // PAGE_EXECUTE_READ // !!выделяеться больше чем запрашиваем
+	VirtualProtect(patchBlock, mbi_patched.RegionSize, PAGE_EXECUTE_READWRITE, &oldProtect_patched); // PAGE_EXECUTE_READ
+
+	//----INIT OUT PARAMS
+	OutPatchPtr = patchBlock; //OutPatchPtr = mbi_patched.BaseAddress;
+	OutPatchSzBlock = mbi_patched.RegionSize;
+
+
+
+	// orig block jmp -> patched block(istruction from orig + my instr) jmp -> orig block
+	//-------------------------PREPEARE--PATCHED--BLOCK
+	//memset(buffer, 0, sizeof(buffer));
+	memset(patchBlock, nop, mbi_patched.RegionSize);
+	//memset(patchBlock, nop, patched_block_sz);
+	std::memcpy(patchBlock, OrigPtr, OrigSzBlock); // to from sz  OrigSzBlock=6
+
+	void* ptr_to_orig_jmp = nullptr;
+	//---JMP IN END BLOCK !! universal
+	//ptr_to_orig_jmp = Transpose(patchBlock, (mbi_patched.RegionSize - sizeof(char) - sizeof(void*)));
+	//---JMP AFTER PATCH SZ !! logical
+	//ptr_to_orig_jmp = Transpose(patchBlock, (OrigSzBlock + PatchSzBlock));
+	//---JMP AFTER ORIG OPCODE IN PATCHED BLOCK !! no patching space in patched region
+	//ptr_to_orig_jmp = Transpose(patchBlock, OrigSzBlock);
+
+	if (jmp_patch_in_end_region)
+	{
+		ptr_to_orig_jmp = Transpose(patchBlock, (mbi_patched.RegionSize - sizeof(char) - sizeof(void*)));
+	}
+	else
+	{
+		ptr_to_orig_jmp = Transpose(patchBlock, (OrigSzBlock + PatchSzBlock));
+	}
+
+	PD_WriteDanger<char>(ptr_to_orig_jmp, jmp); // jmp to orig block
+	int offset1 = CalcJMPE9Offset(ptr_to_orig_jmp, Transpose(OrigPtr, OrigSzBlock));
+	PD_WriteDanger<int>(Transpose(ptr_to_orig_jmp, sizeof(char)), offset1); // pointer to jump (ret to orig block)
+	//PD_WriteDanger<uintptr_t>(Transpose(patchBlock, block_sz + 1), PD_VoidPtr2IntPtr(Transpose(originalCodeBlock, block_sz))); // bug !!only offset
+
+
+
+
+	//---------------------------PREPEARE--ORIGINAL--BLOCK
+	memset(OrigPtr, nop, OrigSzBlock); // nop // nop 6, patch 5 bytes
+
+	void* ptr_to_patched_jmp = Transpose(OrigPtr, 0);
+	PD_WriteDanger<char>(ptr_to_patched_jmp, jmp); // jmp
+	int offset2 = CalcJMPE9Offset(ptr_to_patched_jmp, patchBlock);
+	PD_WriteDanger<int>(Transpose(ptr_to_patched_jmp, sizeof(char)), offset2); // pointer to jump (ret to orig block)
+	//PD_WriteDanger<uintptr_t>(Transpose(originalCodeBlock, 1), PD_VoidPtr2IntPtr(patchBlock)); // pointer to jump (jmp 2 patch)
+
+
+
+
+	//------------------------ORIG---PROTECT
+	if (return_orig_protect && orig_protect_ch)
+	{
+		DWORD oldProtect_ch;
+		VirtualProtect((LPVOID)mbi_orig.BaseAddress, mbi_orig.RegionSize, oldProtect_orig, &oldProtect_ch);
+	}
+
+	//------------------------PATCHED--PROTECT
+	//{ // modify block after func
+	//	DWORD oldProtect_ptch;
+	//	VirtualProtect(patchBlock, patched_block_sz, PAGE_EXECUTE_READ, &oldProtect_ptch); // PAGE_EXECUTE_READWRITE
+	//}
+
+
+
+	//std::cout << "ORIG: 0x" << originalCodeBlock << "\n";
+	//std::cout << "PATCH: 0x" << patchBlock << "\n";
+	//std::cout << "PATCH SZ BLOCK: " << mbi_patched.RegionSize << "\n";
+	//VirtualFree(patchBlock, 0, MEM_RELEASE);
+}
+
+
+
+void PatchTest()
+{
+	void* orig_ptr_for_patch_reference = (void*)0x505505; // !jmp !jz !mov NO OFFSETS OPCODES (def patch sz 5bytes)
+	int available_sz_patch = 6; // (AA BB 11223344)
+	int need_sz_patch = 20; // bytes
+
+	//---OUT
+	void* out_patch_ptr = nullptr;
+	int out_patch_sz = 0; // mbi.region_sz
+	//bool res = SetPatchBlock(orig_ptr_for_patch_reference, available_sz_patch, need_sz_patch, out_patch_ptr, out_patch_sz, true); // jmp in the end region
+	bool res = SetPatchBlock(orig_ptr_for_patch_reference, available_sz_patch, need_sz_patch, out_patch_ptr, out_patch_sz, false); // jmp after need_sz_patch
+
+	//std::cout << "ORIG: 0x" << orig_ptr_for_patch_reference << "\n";
+	//std::cout << "PATCH: 0x" << out_patch_ptr << "\n";
+	//std::cout << "PATCH SZ BLOCK: " << out_patch_sz << "\n";
+}
 
 
 
@@ -380,7 +512,7 @@ public:
 		//InitConsole();
 		//Patch1();
 		//CreateHandlersThread();
-		Patch2();
+		PatchTest();
 
 
 		Events::initGameEvent += [] {
